@@ -1,24 +1,16 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { employees, spaces } from "./config";
 import {
   addDays,
-  cancel,
   dateKey,
   editable,
   isoWeek,
   monday,
-  reserve,
   type Reservation,
 } from "./domain";
-import {
-  BOOKING_KEY,
-  EMPLOYEE_KEY,
-  browserStorage,
-  loadEmployee,
-  loadReservations,
-  saveReservations,
-} from "./storage";
+import { EMPLOYEE_KEY, browserStorage, loadEmployee } from "./storage";
+import { reservations } from "./repository";
 import "./style.css";
 const format = (d: Date) =>
   d.toLocaleDateString("de-DE", {
@@ -30,27 +22,50 @@ function App() {
   const [today, setToday] = useState(() => new Date());
   const [offset, setOffset] = useState(0);
   const [employee, setEmployee] = useState(() => loadEmployee(browserStorage));
-  const [rows, setRows] = useState(() => loadReservations(browserStorage));
+  const [rows, setRows] = useState<Reservation[]>([]);
+  const [ready, setReady] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [connectionError, setConnectionError] = useState("");
+  const operation = useRef(false);
   const [message, setMessage] = useState("");
   const [pending, setPending] = useState<Reservation | null>(null);
   const dialog = useRef<HTMLDialogElement>(null);
+  const refresh = useCallback(async () => {
+    if (operation.current) return;
+    operation.current = true;
+    setBusy(true);
+    setToday(new Date());
+    try {
+      const current = await reservations.list();
+      setRows(current);
+      setReady(true);
+      setConnectionError("");
+    } catch (error) {
+      setReady(false);
+      setConnectionError(
+        error instanceof Error ? error.message : "Laden fehlgeschlagen.",
+      );
+    } finally {
+      operation.current = false;
+      setBusy(false);
+    }
+  }, []);
   useEffect(() => {
-    const refresh = () => {
-      setToday(new Date());
-      setRows(loadReservations(browserStorage));
+    void refresh();
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void refresh();
+    }, 30000);
+    const onFocus = () => {
+      void refresh();
     };
-    const timer = window.setInterval(refresh, 30000);
-    const onStorage = (e: StorageEvent) => {
-      if (e.key === BOOKING_KEY || e.key === null) refresh();
-    };
-    window.addEventListener("storage", onStorage);
-    window.addEventListener("focus", refresh);
+    window.addEventListener("focus", onFocus);
+    window.addEventListener("online", onFocus);
     return () => {
       clearInterval(timer);
-      window.removeEventListener("storage", onStorage);
-      window.removeEventListener("focus", refresh);
+      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("online", onFocus);
     };
-  }, []);
+  }, [refresh]);
   useEffect(() => {
     if (pending) dialog.current?.showModal();
     else dialog.current?.close();
@@ -74,22 +89,33 @@ function App() {
       );
     }
   }
-  function commit(
-    action: (current: Reservation[]) => Reservation[],
-    success: string,
-  ) {
+  async function commit(action: () => Promise<void>, success: string) {
+    if (operation.current || !ready) return;
+    operation.current = true;
+    setBusy(true);
     try {
-      const next = action(loadReservations(browserStorage));
-      saveReservations(browserStorage, next);
-      setRows(next);
+      await action();
       setMessage(success);
-    } catch (e) {
-      setRows(loadReservations(browserStorage));
+      setConnectionError("");
+    } catch (error) {
       setMessage(
-        e instanceof Error
-          ? e.message
-          : "Speichern fehlgeschlagen. Bitte prüfe die Browsereinstellungen.",
+        error instanceof Error ? error.message : "Speichern fehlgeschlagen.",
       );
+    }
+    // Auch nach Konflikten erneut lesen. Kein Zurückfallen auf Browser-Buchungen.
+    try {
+      setRows(await reservations.list());
+      setReady(true);
+    } catch (error) {
+      setReady(false);
+      setConnectionError(
+        error instanceof Error
+          ? error.message
+          : "Aktualisieren fehlgeschlagen.",
+      );
+    } finally {
+      operation.current = false;
+      setBusy(false);
     }
   }
   function click(date: string, space: string, r?: Reservation) {
@@ -103,7 +129,13 @@ function App() {
       return;
     }
     commit(
-      (current) => reserve(current, date, space, employee, new Date()),
+      async () => {
+        const created = await reservations.reserve(date, space, employee);
+        setRows((current) => [
+          ...current.filter((r) => r.id !== created.id),
+          created,
+        ]);
+      },
       `${space} am ${format(new Date(date + "T12:00:00"))} ist für dich reserviert.`,
     );
   }
@@ -119,7 +151,7 @@ function App() {
           </div>
         </div>
         <span className="poc">
-          PoC V1 <span>· Lokal gespeichert</span>
+          Team-PoC <span>· Gemeinsam gespeichert</span>
         </span>
       </header>
       <main>
@@ -134,6 +166,7 @@ function App() {
             <select
               id="employee"
               value={employee}
+              disabled={busy}
               onChange={(e) => choose(e.target.value)}
             >
               <option value="" disabled>
@@ -213,6 +246,27 @@ function App() {
               </button>
             </div>
           </div>
+          <div className="sync-bar">
+            <span role="status">
+              {connectionError
+                ? "Verbindung unterbrochen – Buchungen gesperrt"
+                : !ready
+                  ? "Reservierungen werden geladen …"
+                  : busy
+                    ? "Wird aktualisiert …"
+                    : "Gemeinsamer Stand · automatische Aktualisierung alle 30 Sekunden"}
+            </span>
+            <button onClick={() => void refresh()} disabled={busy}>
+              Aktualisieren
+            </button>
+          </div>
+          {connectionError && (
+            <p className="connection-error" role="alert">
+              {connectionError}{" "}
+              {rows.length > 0 &&
+                "Die angezeigten Buchungen können veraltet sein."}
+            </p>
+          )}
           <div className="table-scroll">
             <table>
               <caption className="sr-only">
@@ -256,27 +310,31 @@ function App() {
                       return (
                         <td key={date}>
                           <button
-                            className={`slot ${past ? "past" : r ? (mine ? "mine" : "occupied") : "free"}`}
-                            disabled={past || !!(r && !mine)}
+                            className={`slot ${!ready ? "unavailable" : past ? "past" : r ? (mine ? "mine" : "occupied") : "free"}`}
+                            disabled={!ready || busy || past || !!(r && !mine)}
                             onClick={() => click(date, space, r)}
-                            aria-label={`${space}, ${format(d)}: ${r ? employees.find((e) => e.id === r.employeeId)?.name : "Frei"}${mine && !past ? ", zum Stornieren anklicken" : ""}`}
+                            aria-label={`${space}, ${format(d)}: ${r ? employees.find((e) => e.id === r.employeeId)?.name : !ready ? "Nicht geladen" : "Frei"}${mine && !past ? ", zum Stornieren anklicken" : ""}`}
                           >
                             <span className="slot-symbol" aria-hidden="true">
                               {past ? "–" : r ? (mine ? "✓" : "●") : "+"}
                             </span>
                             <span>
-                              {r
-                                ? employees.find((e) => e.id === r.employeeId)
-                                    ?.name
-                                : "Frei"}
+                              {!ready && !r
+                                ? "–"
+                                : r
+                                  ? employees.find((e) => e.id === r.employeeId)
+                                      ?.name
+                                  : "Frei"}
                               <small>
-                                {past
-                                  ? "Vergangen"
-                                  : r
-                                    ? mine
-                                      ? "Dein Parkplatz"
-                                      : "Reserviert"
-                                    : "Reservieren"}
+                                {!ready && !r
+                                  ? "Nicht geladen"
+                                  : past
+                                    ? "Vergangen"
+                                    : r
+                                      ? mine
+                                        ? "Dein Parkplatz"
+                                        : "Reserviert"
+                                      : "Reservieren"}
                               </small>
                             </span>
                           </button>
@@ -315,12 +373,14 @@ function App() {
         <aside className="notice">
           <span aria-hidden="true">ⓘ</span>
           <div>
-            <strong>Dein lokaler Testbereich</strong>
+            <strong>Gemeinsam planen</strong>
             <p>
-              Reservierungen werden nur in diesem Browser gespeichert und nicht
-              mit anderen Geräten geteilt. Die Namensauswahl ist keine
-              Anmeldung. Eine verbindliche Vergabe über mehrere Geräte ist in
-              diesem PoC nicht möglich.
+              Reservierungen werden zentral gespeichert und sind auf allen
+              Geräten sichtbar. Änderungen anderer Personen erscheinen
+              spätestens nach 30 Sekunden oder über „Aktualisieren“. Die
+              Namensauswahl ist keine Anmeldung: Wer den Link kennt, kann jeden
+              Namen auswählen. Bisherige lokale Testbuchungen werden nicht
+              übernommen.
             </p>
           </div>
         </aside>
@@ -346,13 +406,15 @@ function App() {
           <button onClick={() => setPending(null)}>Behalten</button>
           <button
             className="primary"
+            disabled={busy || !ready}
             onClick={() => {
               if (pending)
-                commit(
-                  (current) =>
-                    cancel(current, pending.id, employee, new Date()),
-                  "Deine Reservierung wurde storniert.",
-                );
+                commit(async () => {
+                  await reservations.cancel(pending.id, employee);
+                  setRows((current) =>
+                    current.filter((r) => r.id !== pending.id),
+                  );
+                }, "Deine Reservierung wurde storniert.");
               setPending(null);
             }}
           >

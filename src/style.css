@@ -575,3 +575,46 @@ dialog p {
     scrollbar-width: thin;
   }
 }
+.sync-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 26px 14px;
+  color: #536979;
+  font-size: 12px;
+}
+.sync-bar button {
+  border: 1px solid #d9e1e7;
+  border-radius: 7px;
+  padding: 7px 12px;
+  background: white;
+  flex-shrink: 0;
+}
+.sync-bar button:disabled {
+  opacity: 0.5;
+}
+.connection-error {
+  margin: 0 26px 16px;
+  padding: 12px;
+  background: #fff1eb;
+  color: #8c381b;
+  border-radius: 8px;
+}
+.slot:disabled:not(.past):not(.occupied) {
+  opacity: 0.6;
+}
+@media (max-width: 720px) {
+  .sync-bar {
+    padding: 0 14px 12px;
+    font-size: 11px;
+  }
+  .connection-error {
+    margin: 0 14px 14px;
+  }
+}
+.slot.unavailable {
+  background: #f2f4f6;
+  color: #6a7886;
+  border-color: #e9edf0;
+}
